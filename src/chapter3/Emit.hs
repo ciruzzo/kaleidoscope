@@ -9,6 +9,9 @@ import qualified LLVM.AST as AST
 import qualified LLVM.AST.Constant as C
 import qualified LLVM.AST.Float as F
 import qualified LLVM.AST.FloatingPointPredicate as FP
+import LLVM.AST.Type
+import LLVM.AST.AddrSpace
+import LLVM.AST.Typed (typeOf)
 
 import Data.Word
 import Data.Int
@@ -19,8 +22,11 @@ import qualified Data.Map as Map
 import Codegen
 import qualified Syntax as S
 
+import Data.ByteString.Short
+import Control.Monad.Trans.Except (runExceptT)
+
 toSig :: [String] -> [(AST.Type, AST.Name)]
-toSig = map (\x -> (double, AST.Name x))
+toSig = map (\x -> (double, AST.Name $ stringToShortBS x))
 
 codegenTop :: S.Expr -> LLVM ()
 codegenTop (S.Function name args body) = do
@@ -32,7 +38,7 @@ codegenTop (S.Function name args body) = do
       setBlock entry
       forM args $ \a -> do
         var <- alloca double
-        store var (local (AST.Name a))
+        store var (local float (AST.Name $ stringToShortBS a))
         assign a var
       cgen body >>= ret
 
@@ -84,20 +90,20 @@ cgen (S.Var x) = getvar x >>= load
 cgen (S.Float n) = return $ cons $ C.Float (F.Double n)
 cgen (S.Call fn args) = do
   largs <- mapM cgen args
-  call (externf (AST.Name fn)) largs
+  let fnT = AST.PointerType { AST.pointerReferent = (AST.FunctionType { AST.resultType = double, AST.argumentTypes = [FloatingPointType {floatingPointType = DoubleFP}], AST.isVarArg = False}) , AST.pointerAddrSpace = AddrSpace 0 }
+  call (externf fnT (AST.Name $ stringToShortBS fn)) largs
+--  let nm = AST.Name $ stringToShortBS fn
+--  call (externf (fnPtr nm) nm) largs
 
 -------------------------------------------------------------------------------
 -- Compilation
 -------------------------------------------------------------------------------
 
-liftError :: ExceptT String IO a -> IO a
-liftError = runExceptT >=> either fail return
-
 codegen :: AST.Module -> [S.Expr] -> IO AST.Module
 codegen mod fns = withContext $ \context ->
-  liftError $ withModuleFromAST context newast $ \m -> do
+  withModuleFromAST context newast $ \m -> do
     llstr <- moduleLLVMAssembly m
-    putStrLn llstr
+    putStrLn $ byteStringToString llstr
     return newast
   where
     modn    = mapM codegenTop fns
