@@ -105,50 +105,54 @@ executable chapter5
     , bytestring           >= 0.10.10.0
   hs-source-dirs:      src/chapter5
 
--- executable chapter6
---   default-language:    Haskell2010
---   main-is:             Main.hs
---   other-modules:
---    Codegen
---    Emit
---    JIT
---    Lexer
---    Parser
---    Syntax
--- 
---   build-depends:
---       base                 >= 4.7 && <5
---     , haskeline            >= 0.7.1.2
---     , llvm-hs              >= 4.0.0.0
---     , llvm-hs-pure         >= 4.0.0.0
---     , parsec               >= 3.1
---     , containers           >= 0.4
---     , mtl                  >= 2.1.3
---     , transformers         >= 0.3.0.0 && < 0.6
---   hs-source-dirs:      src/chapter6
--- 
--- executable chapter7
---   default-language:    Haskell2010
---   main-is:             Main.hs
---   other-modules:
---     Codegen
---     Emit
---     JIT
---     Lexer
---     Parser
---     Syntax
--- 
---   build-depends:
---       base                 >= 4.7 && <5
---     , haskeline            >= 0.7.1.2
---     , llvm-hs              >= 4.0.0.0
---     , llvm-hs-pure         >= 4.0.0.0
---     , parsec               >= 3.1
---     , containers           >= 0.4
---     , mtl                  >= 2.1.3
---     , transformers         >= 0.3.0.0 && < 0.6
---   hs-source-dirs:      src/chapter7
--- 
+executable chapter6
+  default-language:    Haskell2010
+  main-is:             Main.hs
+  other-modules:
+   Codegen
+   Emit
+   JIT
+   Lexer
+   Parser
+   Syntax
+
+  build-depends:
+      base                 >= 4.7 && <5
+    , haskeline            >= 0.7.1.2
+    , llvm-hs              >= 4.0.0.0
+    , llvm-hs-pure         >= 4.0.0.0
+    , parsec               >= 3.1
+    , containers           >= 0.4
+    , mtl                  >= 2.1.3
+    , transformers         >= 0.3.0.0 && < 0.6
+    , utf8-string          >= 1.0.1.1
+    , bytestring           >= 0.10.10.0
+  hs-source-dirs:      src/chapter6
+
+executable chapter7
+  default-language:    Haskell2010
+  main-is:             Main.hs
+  other-modules:
+    Codegen
+    Emit
+    JIT
+    Lexer
+    Parser
+    Syntax
+
+  build-depends:
+      base                 >= 4.7 && <5
+    , haskeline            >= 0.7.1.2
+    , llvm-hs              >= 4.0.0.0
+    , llvm-hs-pure         >= 4.0.0.0
+    , parsec               >= 3.1
+    , containers           >= 0.4
+    , mtl                  >= 2.1.3
+    , transformers         >= 0.3.0.0 && < 0.6
+    , utf8-string          >= 1.0.1.1
+    , bytestring           >= 0.10.10.0
+  hs-source-dirs:      src/chapter7
+
 library
   default-language:    Haskell2010
   build-depends:

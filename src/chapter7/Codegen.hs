@@ -26,12 +26,27 @@ import Control.Applicative
 import LLVM.AST
 import LLVM.AST.Global
 import qualified LLVM.AST as AST
+import LLVM.AST.Type
+import LLVM.AST.Typed (typeOf)
+import LLVM.AST.AddrSpace
 
 import qualified LLVM.AST.Linkage as L
 import qualified LLVM.AST.Constant as C
 import qualified LLVM.AST.Attribute as A
 import qualified LLVM.AST.CallingConvention as CC
 import qualified LLVM.AST.FloatingPointPredicate as FP
+
+import qualified Data.ByteString.Short as B
+import Data.ByteString.UTF8 as BSU
+
+stringToShortBS :: String -> B.ShortByteString
+stringToShortBS = B.toShort . BSU.fromString
+
+shortBSToString :: B.ShortByteString -> String
+shortBSToString = BSU.toString . B.fromShort
+
+byteStringToString :: BSU.ByteString -> String
+byteStringToString = BSU.toString 
 
 -------------------------------------------------------------------------------
 -- Module Level
@@ -44,7 +59,7 @@ runLLVM :: AST.Module -> LLVM a -> AST.Module
 runLLVM mod (LLVM m) = execState m mod
 
 emptyModule :: String -> AST.Module
-emptyModule label = defaultModule { moduleName = label }
+emptyModule label = defaultModule { moduleName = stringToShortBS label }
 
 addDefn :: Definition -> LLVM ()
 addDefn d = do
@@ -54,7 +69,7 @@ addDefn d = do
 define ::  Type -> String -> [(Type, Name)] -> [BasicBlock] -> LLVM ()
 define retty label argtys body = addDefn $
   GlobalDefinition $ functionDefaults {
-    name        = Name label
+    name        = Name $ stringToShortBS label
   , parameters  = ([Parameter ty nm [] | (ty, nm) <- argtys], False)
   , returnType  = retty
   , basicBlocks = body
@@ -63,7 +78,7 @@ define retty label argtys body = addDefn $
 external ::  Type -> String -> [(Type, Name)] -> LLVM ()
 external retty label argtys = addDefn $
   GlobalDefinition $ functionDefaults {
-    name        = Name label
+    name        = Name $ stringToShortBS label
   , linkage     = L.External
   , parameters  = ([Parameter ty nm [] | (ty, nm) <- argtys], False)
   , returnType  = retty
@@ -74,9 +89,6 @@ external retty label argtys = addDefn $
 -- Types
 -------------------------------------------------------------------------------
 
--- IEEE 754 double
-double :: Type
-double = FloatingPointType 64 IEEE
 
 -------------------------------------------------------------------------------
 -- Names
@@ -139,7 +151,7 @@ emptyBlock :: Int -> BlockState
 emptyBlock i = BlockState i [] Nothing
 
 emptyCodegen :: CodegenState
-emptyCodegen = CodegenState (Name entryBlockName) Map.empty [] 1 0 Map.empty
+emptyCodegen = CodegenState (Name (stringToShortBS entryBlockName)) Map.empty [] 1 0 Map.empty
 
 execCodegen :: [(String, Operand)] -> Codegen a -> CodegenState
 execCodegen vars m = execState (runCodegen m) emptyCodegen { symtab = vars }
@@ -150,22 +162,20 @@ fresh = do
   modify $ \s -> s { count = 1 + i }
   return $ i + 1
 
-current :: Codegen BlockState
-current = do
-  c <- gets currentBlock
-  blks <- gets blocks
-  case Map.lookup c blks of
-    Just x -> return x
-    Nothing -> error $ "No such block: " ++ show c
-
-instr :: Instruction -> Codegen (Operand)
-instr ins = do
+instr :: Type -> Instruction -> Codegen (Operand)
+instr ty ins = do
   n <- fresh
   let ref = (UnName n)
   blk <- current
   let i = stack blk
   modifyBlock (blk { stack = (ref := ins) : i } )
-  return $ local ref
+  return $ local ty ref
+
+unnminstr :: Instruction -> Codegen ()
+unnminstr ins = do
+  blk <- current
+  let i = stack blk
+  modifyBlock (blk {stack = (Do ins) : i})
 
 terminator :: Named Terminator -> Codegen (Named Terminator)
 terminator trm = do
@@ -173,13 +183,13 @@ terminator trm = do
   modifyBlock (blk { term = Just trm })
   return trm
 
-named :: String -> Codegen a -> Codegen Operand
-named iname m = m >> do
-  blk <- current
-  let b = Name iname
-      (_ := x) = last (stack blk)
-  modifyBlock $ blk { stack = init (stack blk) ++ [b := x] }
-  return $ local b
+-- named :: String -> Codegen a -> Codegen Operand
+-- named iname m = m >> do
+--   blk <- current
+--   let b = Name $ stringToShortBS iname
+--       (_ := x) = last (stack blk)
+--   modifyBlock $ blk { stack = init (stack blk) ++ [b := x] }
+--   return $ local b
 
 -------------------------------------------------------------------------------
 -- Block Stack
@@ -197,11 +207,11 @@ addBlock bname = do
   let new = emptyBlock ix
       (qname, supply) = uniqueName bname nms
 
-  modify $ \s -> s { blocks = Map.insert (Name qname) new bls
+  modify $ \s -> s { blocks = Map.insert (Name (stringToShortBS qname)) new bls
                    , blockCount = ix + 1
                    , names = supply
                    }
-  return (Name qname)
+  return (Name (stringToShortBS qname))
 
 setBlock :: Name -> Codegen Name
 setBlock bname = do
@@ -215,6 +225,14 @@ modifyBlock :: BlockState -> Codegen ()
 modifyBlock new = do
   active <- gets currentBlock
   modify $ \s -> s { blocks = Map.insert active new (blocks s) }
+
+current :: Codegen BlockState
+current = do
+  c <- gets currentBlock
+  blks <- gets blocks
+  case Map.lookup c blks of
+    Just x -> return x
+    Nothing -> error $ "No such block: " ++ show c
 
 -------------------------------------------------------------------------------
 -- Symbol Table
@@ -235,52 +253,63 @@ getvar var = do
 -------------------------------------------------------------------------------
 
 -- References
-local ::  Name -> Operand
-local = LocalReference double
+local :: Type -> Name -> Operand
+local = LocalReference 
 
-global ::  Name -> C.Constant
-global = C.GlobalReference double
+global :: Type -> Name -> C.Constant
+global = C.GlobalReference 
 
-externf :: Name -> Operand
-externf = ConstantOperand . C.GlobalReference double
+externf :: Type -> Name -> Operand
+externf ty nm = ConstantOperand (C.GlobalReference ty nm)
 
+fnPtr :: Name -> LLVM Type
+fnPtr nm = findType <$> gets moduleDefinitions
+  where
+    findType defs =
+      case fnDefByName of
+        [] -> error $ "Undefined function: " ++ show nm
+        [fn] -> PointerType (typeOf fn) (AddrSpace 0)
+        _ -> error $ "Ambiguous function name: " ++ show nm
+      where
+        globalDefs = [g | GlobalDefinition g <- defs]
+        fnDefByName = [f | f@(Function {name = nm'}) <- globalDefs, nm' == nm]
 -- Arithmetic and Constants
 fadd :: Operand -> Operand -> Codegen Operand
-fadd a b = instr $ FAdd NoFastMathFlags a b []
+fadd a b = instr float $ FAdd noFastMathFlags a b []
 
 fsub :: Operand -> Operand -> Codegen Operand
-fsub a b = instr $ FSub NoFastMathFlags a b []
+fsub a b = instr float $ FSub noFastMathFlags a b []
 
 fmul :: Operand -> Operand -> Codegen Operand
-fmul a b = instr $ FMul NoFastMathFlags a b []
+fmul a b = instr float $ FMul noFastMathFlags a b []
 
 fdiv :: Operand -> Operand -> Codegen Operand
-fdiv a b = instr $ FDiv NoFastMathFlags a b []
+fdiv a b = instr float $ FDiv noFastMathFlags a b []
 
 fcmp :: FP.FloatingPointPredicate -> Operand -> Operand -> Codegen Operand
-fcmp cond a b = instr $ FCmp cond a b []
+fcmp cond a b = instr float $ FCmp cond a b []
 
 cons :: C.Constant -> Operand
 cons = ConstantOperand
 
 uitofp :: Type -> Operand -> Codegen Operand
-uitofp ty a = instr $ UIToFP a ty []
+uitofp ty a = instr float $ UIToFP a ty []
 
 toArgs :: [Operand] -> [(Operand, [A.ParameterAttribute])]
 toArgs = map (\x -> (x, []))
 
 -- Effects
 call :: Operand -> [Operand] -> Codegen Operand
-call fn args = instr $ Call Nothing CC.C [] (Right fn) (toArgs args) [] []
+call fn args = instr float $ Call Nothing CC.C [] (Right fn) (toArgs args) [] []
 
 alloca :: Type -> Codegen Operand
-alloca ty = instr $ Alloca ty Nothing 0 []
+alloca ty = instr float $ Alloca ty Nothing 0 []
 
-store :: Operand -> Operand -> Codegen Operand
-store ptr val = instr $ Store False ptr val Nothing 0 []
+store :: Operand -> Operand -> Codegen ()
+store ptr val = unnminstr $ Store False ptr val Nothing 0 []
 
 load :: Operand -> Codegen Operand
-load ptr = instr $ Load False ptr Nothing 0 []
+load ptr = instr float $ Load False ptr Nothing 0 []
 
 -- Control Flow
 br :: Name -> Codegen (Named Terminator)
@@ -290,7 +319,7 @@ cbr :: Operand -> Name -> Name -> Codegen (Named Terminator)
 cbr cond tr fl = terminator $ Do $ CondBr cond tr fl []
 
 phi :: Type -> [(Operand, Name)] -> Codegen Operand
-phi ty incoming = instr $ Phi ty incoming []
+phi ty incoming = instr ty $ Phi ty incoming []
 
 ret :: Operand -> Codegen (Named Terminator)
 ret val = terminator $ Do $ Ret (Just val) []

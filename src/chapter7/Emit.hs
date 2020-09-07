@@ -22,6 +22,9 @@ import qualified LLVM.AST as AST
 import qualified LLVM.AST.Constant as C
 import qualified LLVM.AST.Float as F
 import qualified LLVM.AST.FloatingPointPredicate as FP
+import LLVM.AST.Type
+import LLVM.AST.AddrSpace
+import LLVM.AST.Typed (typeOf)
 
 import LLVM.ExecutionEngine ( withMCJIT, withModuleInEngine, getFunction )
 
@@ -35,25 +38,28 @@ import Codegen
 import JIT (runJIT)
 import qualified Syntax as S
 
+import Data.ByteString.Short
+import Control.Monad.Trans.Except (runExceptT)
+
 one = cons $ C.Float (F.Double 1.0)
 zero = cons $ C.Float (F.Double 0.0)
 false = zero
 true = one
 
 toSig :: [String] -> [(AST.Type, AST.Name)]
-toSig = map (\x -> (double, AST.Name x))
+toSig = map (\x -> (double, AST.Name $ stringToShortBS x))
 
 codegenTop :: S.Expr -> LLVM ()
 codegenTop (S.Function name args body) = do
-  define double name largs bls
+  define double name fnargs bls
   where
-    largs = map (\x -> (double, AST.Name x)) args
+    fnargs = toSig args
     bls = createBlocks $ execCodegen [] $ do
       entry <- addBlock entryBlockName
       setBlock entry
       forM args $ \a -> do
         var <- alloca double
-        store var (local (AST.Name a))
+        store var (local float (AST.Name $ stringToShortBS a))
         assign a var
       cgen body >>= ret
 
@@ -118,7 +124,11 @@ cgen (S.Int n) = return $ cons $ C.Float (F.Double (fromIntegral n))
 cgen (S.Float n) = return $ cons $ C.Float (F.Double n)
 cgen (S.Call fn args) = do
   largs <- mapM cgen args
-  call (externf (AST.Name fn)) largs
+  let fnT = AST.PointerType { AST.pointerReferent = (AST.FunctionType { AST.resultType = double, AST.argumentTypes = [FloatingPointType {floatingPointType = DoubleFP}], AST.isVarArg = False}) , AST.pointerAddrSpace = AddrSpace 0 }
+  call (externf fnT (AST.Name $ stringToShortBS fn)) largs
+--  let nm = AST.Name $ stringToShortBS fn
+--  call (externf (fnPtr nm) nm) largs
+
 cgen (S.If cond tr fl) = do
   ifthen <- addBlock "if.then"
   ifelse <- addBlock "if.else"

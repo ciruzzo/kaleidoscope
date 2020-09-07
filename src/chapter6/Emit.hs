@@ -9,6 +9,9 @@ import qualified LLVM.AST as AST
 import qualified LLVM.AST.Constant as C
 import qualified LLVM.AST.Float as F
 import qualified LLVM.AST.FloatingPointPredicate as FP
+import LLVM.AST.Type
+import LLVM.AST.AddrSpace
+import LLVM.AST.Typed (typeOf)
 
 import Data.Word
 import Data.Int
@@ -20,13 +23,16 @@ import Codegen
 import JIT
 import qualified Syntax as S
 
+import Data.ByteString.Short
+import Control.Monad.Trans.Except (runExceptT)
+
 one = cons $ C.Float (F.Double 1.0)
 zero = cons $ C.Float (F.Double 0.0)
 false = zero
 true = one
 
 toSig :: [String] -> [(AST.Type, AST.Name)]
-toSig = map (\x -> (double, AST.Name x))
+toSig = map (\x -> (double, AST.Name $ stringToShortBS x))
 
 codegenTop :: S.Expr -> LLVM ()
 codegenTop (S.Function name args body) = do
@@ -38,7 +44,7 @@ codegenTop (S.Function name args body) = do
       setBlock entry
       forM args $ \a -> do
         var <- alloca double
-        store var (local (AST.Name a))
+        store var (local float (AST.Name $ stringToShortBS a))
         assign a var
       cgen body >>= ret
 
@@ -80,6 +86,11 @@ binops = Map.fromList [
 cgen :: S.Expr -> Codegen AST.Operand
 cgen (S.UnaryOp op a) = do
   cgen $ S.Call ("unary" ++ op) [a]
+cgen (S.BinaryOp "=" (S.Var var) val) = do
+  a <- getvar var
+  cval <- cgen val
+  store a cval
+  return cval
 cgen (S.BinaryOp op a b) = do
   case Map.lookup op binops of
     Just f  -> do
@@ -91,7 +102,11 @@ cgen (S.Var x) = getvar x >>= load
 cgen (S.Float n) = return $ cons $ C.Float (F.Double n)
 cgen (S.Call fn args) = do
   largs <- mapM cgen args
-  call (externf (AST.Name fn)) largs
+  let fnT = AST.PointerType { AST.pointerReferent = (AST.FunctionType { AST.resultType = double, AST.argumentTypes = [FloatingPointType {floatingPointType = DoubleFP}], AST.isVarArg = False}) , AST.pointerAddrSpace = AddrSpace 0 }
+  call (externf fnT (AST.Name $ stringToShortBS fn)) largs
+--  let nm = AST.Name $ stringToShortBS fn
+--  call (externf (fnPtr nm) nm) largs
+
 cgen (S.If cond tr fl) = do
   ifthen <- addBlock "if.then"
   ifelse <- addBlock "if.else"
@@ -152,7 +167,6 @@ cgen (S.For ivar start cond step body) = do
   ------------------
   setBlock forexit
   return zero
-cgen x = error (show x)
 
 -------------------------------------------------------------------------------
 -- Compilation
@@ -160,10 +174,8 @@ cgen x = error (show x)
 
 codegen :: AST.Module -> [S.Expr] -> IO AST.Module
 codegen mod fns = do
-  res <- runJIT oldast
-  case res  of
-    Right newast -> return newast
-    Left err     -> putStrLn err >> return oldast
+  newast <- runJIT oldast
+  return newast
   where
     modn    = mapM codegenTop fns
     oldast  = runLLVM mod modn
