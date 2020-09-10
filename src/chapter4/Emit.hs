@@ -15,6 +15,8 @@ import LLVM.AST.Typed (typeOf)
 
 import Data.Word
 import Data.Int
+
+import Control.Monad.Trans.State
 import Control.Monad.Except
 import Control.Applicative
 import qualified Data.Map as Map
@@ -29,8 +31,8 @@ import Control.Monad.Trans.Except (runExceptT)
 toSig :: [String] -> [(AST.Type, AST.Name)]
 toSig = map (\x -> (double, AST.Name $ stringToShortBS x))
 
-codegenTop :: S.Expr -> LLVM ()
-codegenTop (S.Function name args body) = do
+codegenTop :: AST.Module -> S.Expr -> LLVM ()
+codegenTop mod (S.Function name args body) = do
   define double name fnargs bls
   where
     fnargs = toSig args
@@ -41,19 +43,19 @@ codegenTop (S.Function name args body) = do
         var <- alloca double
         store var (local float (AST.Name $ stringToShortBS a))
         assign a var
-      cgen body >>= ret
+      cgen mod body >>= ret
 
-codegenTop (S.Extern name args) = do
+codegenTop mod (S.Extern name args) = do
   external double name fnargs
   where fnargs = toSig args
 
-codegenTop exp = do
+codegenTop mod exp = do
   define double "main" [] blks
   where
     blks = createBlocks $ execCodegen $ do
       entry <- addBlock entryBlockName
       setBlock entry
-      cgen exp >>= ret
+      cgen mod exp >>= ret
 
 -------------------------------------------------------------------------------
 -- Operations
@@ -72,29 +74,28 @@ binops = Map.fromList [
     , ("<", lt)
   ]
 
-cgen :: S.Expr -> Codegen AST.Operand
-cgen (S.UnaryOp op a) = do
-  cgen $ S.Call ("unary" ++ op) [a]
-cgen (S.BinaryOp "=" (S.Var var) val) = do
+cgen :: AST.Module -> S.Expr -> Codegen AST.Operand
+cgen mod (S.UnaryOp op a) = do
+  cgen mod $ S.Call ("unary" ++ op) [a]
+cgen mod (S.BinaryOp "=" (S.Var var) val) = do
   a <- getvar var
-  cval <- cgen val
+  cval <- cgen mod val
   store a cval
   return cval
-cgen (S.BinaryOp op a b) = do
+cgen mod (S.BinaryOp op a b) = do
   case Map.lookup op binops of
     Just f  -> do
-      ca <- cgen a
-      cb <- cgen b
+      ca <- cgen mod a
+      cb <- cgen mod b
       f ca cb
     Nothing -> error "No such operator"
-cgen (S.Var x) = getvar x >>= load
-cgen (S.Float n) = return $ cons $ C.Float (F.Double n)
-cgen (S.Call fn args) = do
-  largs <- mapM cgen args
-  let fnT = AST.PointerType { AST.pointerReferent = (AST.FunctionType { AST.resultType = double, AST.argumentTypes = [FloatingPointType {floatingPointType = DoubleFP}], AST.isVarArg = False}) , AST.pointerAddrSpace = AddrSpace 0 }
-  call (externf fnT (AST.Name $ stringToShortBS fn)) largs
---  let nm = AST.Name $ stringToShortBS fn
---  call (externf (fnPtr nm) nm) largs
+cgen mod (S.Var x) = getvar x >>= load
+cgen mod (S.Float n) = return $ cons $ C.Float (F.Double n)
+cgen mod (S.Call fn args) = do
+  largs <- mapM (cgen mod) args
+  let nm = AST.Name $ stringToShortBS fn
+  let ty = evalLLVM mod (fnPtr nm) 
+  call (externf ty nm) largs
 
 -------------------------------------------------------------------------------
 -- Compilation
@@ -105,5 +106,6 @@ codegen mod fns = do
   newast <- runJIT oldast
   return newast
   where
-    modn    = mapM codegenTop fns
+    modn    = mapM (codegenTop mod) fns
     oldast  = runLLVM mod modn
+

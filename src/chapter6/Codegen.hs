@@ -47,6 +47,9 @@ newtype LLVM a = LLVM (State AST.Module a)
 runLLVM :: AST.Module -> LLVM a -> AST.Module
 runLLVM mod (LLVM m) = execState m mod
 
+evalLLVM :: AST.Module -> LLVM a -> a
+evalLLVM mod (LLVM m) = evalState m mod 
+
 emptyModule :: String -> AST.Module
 emptyModule label = defaultModule { moduleName = stringToShortBS label }
 
@@ -246,6 +249,7 @@ externf ty nm = ConstantOperand (C.GlobalReference ty nm)
 fnPtr :: Name -> LLVM Type
 fnPtr nm = findType <$> gets moduleDefinitions
   where
+    findType :: [Definition] -> Type 
     findType defs =
       case fnDefByName of
         [] -> error $ "Undefined function: " ++ show nm
@@ -254,6 +258,7 @@ fnPtr nm = findType <$> gets moduleDefinitions
       where
         globalDefs = [g | GlobalDefinition g <- defs]
         fnDefByName = [f | f@(Function {name = nm'}) <- globalDefs, nm' == nm]
+
 -- Arithmetic and Constants
 fadd :: Operand -> Operand -> Codegen Operand
 fadd a b = instr float $ FAdd noFastMathFlags a b []

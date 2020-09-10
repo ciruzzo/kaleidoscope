@@ -15,6 +15,8 @@ import LLVM.AST.Typed (typeOf)
 
 import Data.Word
 import Data.Int
+
+import Control.Monad.Trans.State
 import Control.Monad.Except
 import Control.Applicative
 import qualified Data.Map as Map
@@ -34,8 +36,8 @@ true = one
 toSig :: [String] -> [(AST.Type, AST.Name)]
 toSig = map (\x -> (double, AST.Name $ stringToShortBS x))
 
-codegenTop :: S.Expr -> LLVM ()
-codegenTop (S.Function name args body) = do
+codegenTop :: AST.Module -> S.Expr -> LLVM ()
+codegenTop mod (S.Function name args body) = do
   define double name fnargs bls
   where
     fnargs = toSig args
@@ -46,25 +48,25 @@ codegenTop (S.Function name args body) = do
         var <- alloca double
         store var (local float (AST.Name $ stringToShortBS a))
         assign a var
-      cgen body >>= ret
+      cgen mod body >>= ret
 
-codegenTop (S.Extern name args) = do
+codegenTop mod (S.Extern name args) = do
   external double name fnargs
   where fnargs = toSig args
 
-codegenTop (S.BinaryDef name args body) =
-  codegenTop $ S.Function ("binary" ++ name) args body
+codegenTop mod (S.BinaryDef name args body) =
+  codegenTop mod $ S.Function ("binary" ++ name) args body
 
-codegenTop (S.UnaryDef name args body) =
-  codegenTop $ S.Function ("unary" ++ name) args body
+codegenTop mod (S.UnaryDef name args body) =
+  codegenTop mod $ S.Function ("unary" ++ name) args body
 
-codegenTop exp = do
+codegenTop mod exp = do
   define double "main" [] blks
   where
     blks = createBlocks $ execCodegen $ do
       entry <- addBlock entryBlockName
       setBlock entry
-      cgen exp >>= ret
+      cgen mod exp >>= ret
 
 -------------------------------------------------------------------------------
 -- Operations
@@ -83,52 +85,51 @@ binops = Map.fromList [
     , ("<", lt)
   ]
 
-cgen :: S.Expr -> Codegen AST.Operand
-cgen (S.UnaryOp op a) = do
-  cgen $ S.Call ("unary" ++ op) [a]
-cgen (S.BinaryOp "=" (S.Var var) val) = do
+cgen :: AST.Module -> S.Expr -> Codegen AST.Operand
+cgen mod (S.UnaryOp op a) = do
+  cgen mod $ S.Call ("unary" ++ op) [a]
+cgen mod (S.BinaryOp "=" (S.Var var) val) = do
   a <- getvar var
-  cval <- cgen val
+  cval <- cgen mod val
   store a cval
   return cval
-cgen (S.BinaryOp op a b) = do
+cgen mod (S.BinaryOp op a b) = do
   case Map.lookup op binops of
     Just f  -> do
-      ca <- cgen a
-      cb <- cgen b
+      ca <- cgen mod a
+      cb <- cgen mod b
       f ca cb
-    Nothing -> cgen (S.Call ("binary" ++ op) [a,b])
-cgen (S.Var x) = getvar x >>= load
-cgen (S.Float n) = return $ cons $ C.Float (F.Double n)
-cgen (S.Call fn args) = do
-  largs <- mapM cgen args
-  let fnT = AST.PointerType { AST.pointerReferent = (AST.FunctionType { AST.resultType = double, AST.argumentTypes = [FloatingPointType {floatingPointType = DoubleFP}], AST.isVarArg = False}) , AST.pointerAddrSpace = AddrSpace 0 }
-  call (externf fnT (AST.Name $ stringToShortBS fn)) largs
---  let nm = AST.Name $ stringToShortBS fn
---  call (externf (fnPtr nm) nm) largs
+    Nothing -> cgen mod (S.Call ("binary" ++ op) [a,b])
+cgen mod (S.Var x) = getvar x >>= load
+cgen mod (S.Float n) = return $ cons $ C.Float (F.Double n)
+cgen mod (S.Call fn args) = do
+  largs <- mapM (cgen mod) args
+  let nm = AST.Name $ stringToShortBS fn
+  let ty = evalLLVM mod (fnPtr nm)
+  call (externf ty nm) largs
 
-cgen (S.If cond tr fl) = do
+cgen mod (S.If cond tr fl) = do
   ifthen <- addBlock "if.then"
   ifelse <- addBlock "if.else"
   ifexit <- addBlock "if.exit"
 
   -- %entry
   ------------------
-  cond <- cgen cond
+  cond <- cgen mod cond
   test <- fcmp FP.ONE false cond
   cbr test ifthen ifelse -- Branch based on the condition
 
   -- if.then
   ------------------
   setBlock ifthen
-  trval <- cgen tr       -- Generate code for the true branch
+  trval <- cgen mod tr       -- Generate code for the true branch
   br ifexit              -- Branch to the merge block
   ifthen <- getBlock
 
   -- if.else
   ------------------
   setBlock ifelse
-  flval <- cgen fl       -- Generate code for the false branch
+  flval <- cgen mod fl       -- Generate code for the false branch
   br ifexit              -- Branch to the merge block
   ifelse <- getBlock
 
@@ -137,15 +138,15 @@ cgen (S.If cond tr fl) = do
   setBlock ifexit
   phi double [(trval, ifthen), (flval, ifelse)]
 
-cgen (S.For ivar start cond step body) = do
+cgen mod (S.For ivar start cond step body) = do
   forloop <- addBlock "for.loop"
   forexit <- addBlock "for.exit"
 
   -- %entry
   ------------------
   i <- alloca double
-  istart <- cgen start           -- Generate loop variable initial value
-  stepval <- cgen step           -- Generate loop variable step
+  istart <- cgen mod start           -- Generate loop variable initial value
+  stepval <- cgen mod step           -- Generate loop variable step
 
   store i istart                 -- Store the loop variable initial value
   assign ivar i                  -- Assign loop variable to the variable name
@@ -154,12 +155,12 @@ cgen (S.For ivar start cond step body) = do
   -- for.loop
   ------------------
   setBlock forloop
-  cgen body                      -- Generate the loop body
+  cgen mod body                      -- Generate the loop body
   ival <- load i                 -- Load the current loop iteration
   inext <- fadd ival stepval     -- Increment loop variable
   store i inext
 
-  cond <- cgen cond              -- Generate the loop condition
+  cond <- cgen mod cond              -- Generate the loop condition
   test <- fcmp FP.ONE false cond -- Test if the loop condition is True ( 1.0 )
   cbr test forloop forexit       -- Generate the loop condition
 
@@ -177,5 +178,6 @@ codegen mod fns = do
   newast <- runJIT oldast
   return newast
   where
-    modn    = mapM codegenTop fns
+    modn    = mapM (codegenTop mod) fns
     oldast  = runLLVM mod modn
+
